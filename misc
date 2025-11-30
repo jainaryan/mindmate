@@ -1,0 +1,133 @@
+code to download model:
+python -m mlx_lm convert \
+  --hf-path meta-llama/Meta-Llama-3.1-8B-Instruct \
+  --mlx-path ./mlx_llama31_8b \
+  --q-bits 4 --q-group-size 64
+
+
+hf token:
+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
+
+
+data pipeline:
+python dataloader.py
+python preprocessing.py \
+  --train-in  /Users/aryanjain/projects/mindmate/data/mindmate_train.jsonl \
+  --val-in    /Users/aryanjain/projects/mindmate/data/mindmate_val.jsonl   \
+  --train-out /Users/aryanjain/projects/mindmate/data/mindmate_train.cleaned.jsonl \
+  --val-out   /Users/aryanjain/projects/mindmate/data/mindmate_val.cleaned.jsonl
+
+python preprocessing.py \
+  --train-in  /Users/aryanjain/projects/mindmate/data/mindmate_train.jsonl \
+  --val-in    /Users/aryanjain/projects/mindmate/data/mindmate_val.jsonl   \
+  --train-out /Users/aryanjain/projects/mindmate/data/mindmate_train.cleaned.jsonl \
+  --val-out   /Users/aryanjain/projects/mindmate/data/mindmate_val.cleaned.jsonl \
+  --ensure-assistant-last --drop-min-turns 2
+quick checks:
+wc -l /Users/aryanjain/projects/mindmate/data/mindmate_*cleaned.jsonl
+head -n1 /Users/aryanjain/projects/mindmate/data/mindmate_train.cleaned.jsonl | jq .
+token based splitting:
+# Train split
+python split_jsonl.py \
+  --in  /Users/aryanjain/projects/mindmate/data/mindmate_train.cleaned.jsonl \
+  --out /Users/aryanjain/projects/mindmate/data/mindmate_train.split.jsonl   \
+  --model-dir meta-llama/Llama-3.2-3B-Instruct \
+  --max-len 2048 --overlap 128
+
+# Val split
+python split_jsonl.py \
+  --in  /Users/aryanjain/projects/mindmate/data/mindmate_val.cleaned.jsonl \
+  --out /Users/aryanjain/projects/mindmate/data/mindmate_val.split.jsonl   \
+  --model-dir meta-llama/Llama-3.2-3B-Instruct \
+  --max-len 2048 --overlap 128
+checks:
+# counts
+wc -l /Users/aryanjain/projects/mindmate/data/mindmate_*split.jsonl
+
+# peek one record; should include "text" and "chunk_id"
+head -n1 /Users/aryanjain/projects/mindmate/data/mindmate_train.split.jsonl | jq .
+
+
+lora run command:
+caffeinate -dimsu nice -n 15 bash -lc '
+  set -euo pipefail
+  PY="/Users/aryanjain/miniconda3/envs/mindmatenv/bin/python"
+
+  echo "Using: $($PY -V) @ $PY"
+  $PY -c "import mlx_lm, mlx.core as mx; print(\"mlx_lm OK from\", __import__(\"sys\").executable)"
+
+  # ✅ correct HF repo id
+  MODEL_HF="meta-llama/Llama-3.2-3B-Instruct"
+  MODEL_DIR="./mlx_llama32_3b"
+
+  # convert (downloads on first run)
+  if [ ! -d "$MODEL_DIR" ]; then
+    $PY -m mlx_lm convert \
+      --hf-path "$MODEL_HF" \
+      --mlx-path "$MODEL_DIR" \
+      --q-bits 4 --q-group-size 64
+  else
+    echo "[convert] skipped (already have $MODEL_DIR)"
+  fi
+
+  # stage data
+  DATA_DIR="./data_mindmate"
+  mkdir -p "$DATA_DIR"
+  ln -sf /Users/aryanjain/projects/mindmate/data/mindmate_train.cleaned.jsonl "$DATA_DIR/train.jsonl"
+  ln -sf /Users/aryanjain/projects/mindmate/data/mindmate_val.cleaned.jsonl   "$DATA_DIR/valid.jsonl"
+
+  # train (smaller settings for MacBook Air)
+  EVERY=50; TOTAL=3000
+  /Users/aryanjain/miniconda3/envs/mindmatenv/bin/mlx_lm.lora \
+    --model "$MODEL_DIR" \
+    --train \
+    --data "$DATA_DIR" \
+    --batch-size 1 \
+    --iters $TOTAL \
+    --save-every 200 \
+    --max-seq-length 2048 \
+    --num-layers 8 \
+    --learning-rate 1e-4 \
+    --grad-checkpoint \
+    --adapter-path ./adapters/mindmate_llama32_3b_lora 2>&1 \
+  | tee train.log \
+  | $PY eta_tap.py --total $TOTAL --every $EVERY
+'
+
+stopped after ~2200 iterations
+
+
+chose chkpt 600 cause lowest val
+split into smaller tokens
+
+python split_tokens.py --in "$TRAIN_IN" --out train.split.jsonl --model-dir ./mlx_llama32_3b --max-len 2048 --overlap 128
+python split_tokens.py --in "$VALID_IN" --out valid.split.jsonl --model-dir ./mlx_llama32_3b --max-len 2048 --overlap 128
+mkdir -p ./data_mindmate
+
+ln -sf "$(pwd)/train.split.jsonl" ./data_mindmate/train.jsonl
+ln -sf "$(pwd)/valid.split.jsonl" ./data_mindmate/valid.jsonl
+ln -sf "$(pwd)/valid.split.jsonl" ./data_mindmate/test.jsonl
+wc -l train.split.jsonl valid.split.jsonl
+total 0
+lrwxr-xr-x@ 1 aryanjain  staff  52 Oct 24 22:08 test.jsonl -> /Users/aryanjain/projects/mindmate/valid.split.jsonl
+lrwxr-xr-x@ 1 aryanjain  staff  52 Oct 24 22:08 train.jsonl -> /Users/aryanjain/projects/mindmate/train.split.jsonl
+lrwxr-xr-x@ 1 aryanjain  staff  52 Oct 24 22:08 valid.jsonl -> /Users/aryanjain/projects/mindmate/valid.split.jsonl
+
+then ran this for re-fine tuning(10 layers and lower learning rate):
+/Users/aryanjain/miniconda3/envs/mindmatenv/bin/mlx_lm.lora \
+  --model ./mlx_llama32_3b \
+  --train \
+  --data ./data_mindmate \
+  --batch-size 1 \
+  --iters 800 \
+  --save-every 100 \
+  --max-seq-length 2048 \
+  --num-layers 10 \
+  --learning-rate 7e-5 \
+  --grad-checkpoint \
+  --steps-per-eval 100 \
+  --steps-per-report 50 \
+  --resume-adapter-file adapters/mindmate_llama32_3b_lora/0000600_adapters.safetensors \
+  --adapter-path adapters/mindmate_llama32_3b_lora 2>&1 | tee run_nl10_800.log
+
+delete training sample 726

@@ -1,0 +1,21 @@
+# OS / editor junk
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Virtual environments (if you ever create them here)
+venv/
+.env/
+.venv/
+
+# Base model weights – DO NOT COMMIT
+mlx_llama32_3b/

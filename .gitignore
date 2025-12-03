@@ -19,3 +19,10 @@ venv/
 
 # Base model weights – DO NOT COMMIT
 mlx_llama32_3b/
+
+# === Large model weight files (keep out of git) ===
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.pte
